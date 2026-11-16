@@ -51,6 +51,14 @@ with tempfile.TemporaryDirectory() as tmp:
     assert min(cleaned.getpixel((600, 600))) > 245
     assert max(cleaned.getpixel((200, 105))) < 80
 
+    # hand-placed stamp keeps its colour and lands where asked, even in grayscale mode
+    stamp = core.Stamp(str(tmp / "stamp.png"), 0.5, 0.5, 0.2)
+    img = core.process(Image.new("RGB", (1000, 1400), "white"), core.Settings(mode="gray"), [stamp])
+    assert img.getpixel((520, 720)) == (200, 0, 0) and img.getpixel((480, 720)) == (255, 255, 255)
+    assert img.getpixel((690, 720)) == (200, 0, 0) and img.getpixel((710, 720)) == (255, 255, 255)
+    pages[2].stamps.append(stamp)
+    core.build(pages, core.Settings(mode="bw"), tmp / "stamped.pdf")
+
     try:
         core.build(pages, core.Settings(), tmp / "in.pdf")
         raise AssertionError("overwriting an input must be refused")

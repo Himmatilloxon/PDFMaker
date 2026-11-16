@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +36,16 @@ STAMP_POS = {
 }
 
 
+@dataclass(eq=False)
+class Stamp:
+    """An image placed by hand on one page. Position and width are fractions of the page."""
+
+    path: str
+    x: float  # left edge / page width
+    y: float  # top edge / page height
+    w: float  # width / page width
+
+
 @dataclass
 class Page:
     path: str  # the PDF or image actually rendered (the converted PDF for Word files)
@@ -43,6 +53,7 @@ class Page:
     name: str
     is_image: bool = False
     rotation: int = 0  # clockwise degrees, multiple of 90
+    stamps: list = field(default_factory=list)  # hand-placed Stamp objects
 
 
 @dataclass
@@ -210,8 +221,8 @@ def overlay(img: Image.Image, s: Settings) -> Image.Image:
     return Image.alpha_composite(base, layer).convert("RGB")
 
 
-def process(img: Image.Image, s: Settings) -> Image.Image:
-    """Apply crop, clean-up, adjustments, colour mode and watermark."""
+def process(img: Image.Image, s: Settings, stamps=()) -> Image.Image:
+    """Apply crop, clean-up, adjustments, colour mode, watermark and hand-placed stamps."""
     if s.crop:
         dx, dy = int(img.width * s.crop), int(img.height * s.crop)
         img = img.crop((dx, dy, img.width - dx, img.height - dy))
@@ -229,6 +240,13 @@ def process(img: Image.Image, s: Settings) -> Image.Image:
         img = overlay(img, s)
         if s.mode != "color":
             img = img.convert("L")
+    if stamps:  # pasted last so they keep their own colours, exactly as previewed
+        img = img.convert("RGB")
+        for st in stamps:
+            im = Image.open(st.path).convert("RGBA")
+            w = max(1, round(img.width * st.w))
+            im = im.resize((w, max(1, round(im.height * w / im.width))), Image.LANCZOS)
+            img.paste(im, (round(st.x * img.width), round(st.y * img.height)), im)
     return img
 
 
@@ -241,9 +259,9 @@ def build(pages: list[Page], s: Settings, out_path: Path, progress=lambda i, n: 
     # shortcut: pages are rendered one at a time; go multi-process if huge jobs feel slow
     for i, page in enumerate(pages):
         progress(i, len(pages))
-        img = process(render(page, s.dpi), s)
+        img = process(render(page, s.dpi), s, page.stamps)
         buf = io.BytesIO()
-        if s.quality and s.mode != "bw":  # black-and-white is far smaller as PNG
+        if s.quality and (s.mode != "bw" or page.stamps):  # black-and-white is far smaller as PNG
             img.save(buf, "JPEG", quality=s.quality)
         else:
             img.save(buf, "PNG")

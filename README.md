@@ -13,7 +13,9 @@ Turn Word documents, PDFs and images into a **flattened PDF**: every page is a p
 - **Quality presets**: from a small 150 DPI file to lossless 300 DPI.
 - **Image adjustments**: colour, grayscale or black-and-white; brightness; contrast; crop edges.
 - **Clean page background**: turns grey, yellow or shadowed paper white. Useful for scans and phone photos of documents.
-- **Watermark and stamp**: diagonal text and/or an image such as a logo or signature.
+- **Watermark and automatic stamp**: diagonal text and/or an image such as a logo, put in the same place on every page.
+- **Stamps placed by hand**: drop a seal or signature on any page, drag it where you want and resize it. Each page keeps its own stamps.
+- **Stamp library**: your stamp images are kept in `Documents\PDFMaker Stamps`, one folder per type (for example `Signatures`, `Seals`). Each stamp remembers the size you last used.
 - **Live preview** of every setting before you save.
 
 ## How to use
@@ -24,6 +26,15 @@ Turn Word documents, PDFs and images into a **flattened PDF**: every page is a p
 4. Arrange the pages in the list on the left. Select a page to preview it.
 5. Pick the quality and any adjustments in the panel on the right.
 6. Click **Save PDF** (Ctrl+S).
+
+### Placing stamps by hand
+
+1. Open the **Stamps** tab. Pick a folder, or create one with **New folder**.
+2. Click **Add images…** to copy your stamp images into that folder. PNG files with a transparent background look best.
+3. Select the page you want, then drag a stamp from the list onto it, or double-click the stamp.
+4. Drag the stamp to move it. Drag the round corner handle, or use the mouse wheel, to resize it. Arrow keys nudge it; `+` and `-` resize it; `Del` removes it.
+
+Hand-placed stamps keep their own colours even when the page is set to grayscale or black-and-white. To rename, move or delete stamps in the library, click **Open folder** and do it in Explorer, then click **Refresh**.
 
 Notes:
 
