@@ -17,14 +17,15 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
 import pymupdf
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageMath, ImageOps
 
 A4 = (595.276, 841.89)  # points
+WORD_OPEN_TIMEOUT = 30  # seconds; a normal document opens in a few
 WORD_EXT = {".docx", ".doc", ".rtf", ".odt"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 STAMP_POS = {
@@ -88,6 +89,13 @@ def _cleanup():
 atexit.register(_cleanup)
 
 
+def release(in_use: set):
+    """Close source PDFs that no page uses any more, so Windows unlocks the files."""
+    with _lock:
+        for key in [k for k in _docs if k not in in_use]:
+            _docs.pop(key).close()
+
+
 def word_to_pdf(path: Path) -> Path:
     """Convert with Microsoft Word (best fidelity); fall back to LibreOffice."""
     global _tmp
@@ -100,14 +108,35 @@ def word_to_pdf(path: Path) -> Path:
 
         pythoncom.CoInitialize()
         word = win32com.client.DispatchEx("Word.Application")
+    except Exception as e:
+        word, word_err = None, e
+    if word:
+        # Word is invisible, so a password or repair prompt would wait forever. Find the
+        # process of *this* Word (by a unique caption) and kill it if opening takes too long.
+        import win32gui
+        import win32process
+
+        word.Caption = tag = f"pdfmaker-{uuid.uuid4().hex}"
+        pid = win32process.GetWindowThreadProcessId(win32gui.FindWindow("OpusApp", tag))[1]
+        watchdog = threading.Timer(WORD_OPEN_TIMEOUT, lambda: subprocess.run(
+            ["taskkill", "/F", "/PID", str(pid)], capture_output=True))
         try:
             word.DisplayAlerts = 0
+            word.AutomationSecurity = 3  # force-disable macros: never run code from files we convert
+            watchdog.start()
             doc = word.Documents.Open(str(path), ReadOnly=True, AddToRecentFiles=False)
+            watchdog.cancel()
             doc.SaveAs2(str(out), FileFormat=17)  # 17 = PDF
             doc.Close(False)
+        except Exception as e:
+            raise RuntimeError(f"Word could not open {path.name}. It may be password-protected or damaged.\n({e})")
         finally:
-            word.Quit()
-    except Exception as word_err:
+            watchdog.cancel()
+            try:
+                word.Quit()
+            except Exception:
+                pass  # already killed by the watchdog
+    else:
         candidates = [
             shutil.which("soffice"),
             r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -121,7 +150,10 @@ def word_to_pdf(path: Path) -> Path:
             )
         cmd = [soffice, "--headless", "--norestore", "--convert-to", "pdf",
                "--outdir", str(out_dir), str(path)]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"LibreOffice took too long on {path.name}. It may be password-protected or damaged.")
         if result.returncode != 0:
             raise RuntimeError(f"LibreOffice failed on {path.name}:\n{result.stdout}{result.stderr}")
     if not out.exists():
@@ -135,8 +167,11 @@ def load(path: Path) -> list[Page]:
     ext = path.suffix.lower()
     if ext in IMAGE_EXT:
         with Image.open(path) as im:
+            frames = getattr(im, "n_frames", 1) if ext in (".tif", ".tiff") else 1  # scanners put many pages in one TIFF
             im.verify()
-        return [Page(str(path), 0, path.name, is_image=True)]
+        if frames == 1:
+            return [Page(str(path), 0, path.name, is_image=True)]
+        return [Page(str(path), i, f"{path.name}  p{i + 1}", is_image=True) for i in range(frames)]
     if ext in WORD_EXT:
         pdf = word_to_pdf(path)
     elif ext == ".pdf":
@@ -156,7 +191,11 @@ def load(path: Path) -> list[Page]:
 def render(page: Page, dpi: int) -> Image.Image:
     """Rasterize one page to an RGB image, rotation applied."""
     if page.is_image:
-        img = ImageOps.exif_transpose(Image.open(page.path))
+        with Image.open(page.path) as f:
+            f.seek(page.index)
+            img = ImageOps.exif_transpose(f)
+        if img.mode.startswith("I;16") or img.mode == "I":  # 16-bit scans: scale down, don't clip to white
+            img = img.convert("I").point(lambda v: v / 256).convert("L")
         if img.mode in ("RGBA", "LA", "P"):  # transparent areas become white, not black
             img = img.convert("RGBA")
             white = Image.new("RGB", img.size, "white")
@@ -182,9 +221,15 @@ def clean_background(img: Image.Image) -> Image.Image:
     """
     small = img.resize((400, max(1, round(400 * img.height / img.width))), Image.BILINEAR)
     paper = small.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(4))
-    paper = np.maximum(np.asarray(paper.resize(img.size, Image.BILINEAR), np.float32), 1)
-    out = np.asarray(img, np.float32) / paper * (255 * 255 / 235)  # push near-white to white
-    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+    paper = paper.resize(img.size, Image.BILINEAR)
+    k = 255 * 255 / 235  # push near-white to white
+
+    def divide(ink, bg):
+        return ImageMath.lambda_eval(
+            lambda e: e["convert"](e["min"](e["float"](e["i"]) * k / e["max"](e["p"], 1), 255), "L"),
+            i=ink, p=bg)
+
+    return Image.merge("RGB", [divide(i, p) for i, p in zip(img.split(), paper.split())])
 
 
 def _font(size: int):
@@ -246,7 +291,10 @@ def process(img: Image.Image, s: Settings, stamps=()) -> Image.Image:
             im = Image.open(st.path).convert("RGBA")
             w = max(1, round(img.width * st.w))
             im = im.resize((w, max(1, round(im.height * w / im.width))), Image.LANCZOS)
-            img.paste(im, (round(st.x * img.width), round(st.y * img.height)), im)
+            # Clamp: rotating or cropping after placing can push a stamp past the edge.
+            x = min(max(round(st.x * img.width), 0), max(img.width - im.width, 0))
+            y = min(max(round(st.y * img.height), 0), max(img.height - im.height, 0))
+            img.paste(im, (x, y), im)
     return img
 
 
@@ -256,6 +304,22 @@ def build(pages: list[Page], s: Settings, out_path: Path, progress=lambda i, n: 
     if any(Path(p.path) == out_path for p in pages):
         raise ValueError("The output file cannot be one of the input files.")
     out = pymupdf.open()
+    tmp = out_path.with_name(out_path.name + ".part")  # never leave a half-written PDF
+    try:
+        _write_pages(out, pages, s, progress)
+        out.save(tmp, deflate=True, garbage=3)
+        out.close()
+        os.replace(tmp, out_path)
+    except PermissionError:
+        raise RuntimeError(f"Could not write {out_path.name}. If it is open in another program, "
+                           "close it and try again.") from None
+    finally:
+        if not out.is_closed:
+            out.close()
+        tmp.unlink(missing_ok=True)
+
+
+def _write_pages(out, pages, s, progress):
     # shortcut: pages are rendered one at a time; go multi-process if huge jobs feel slow
     for i, page in enumerate(pages):
         progress(i, len(pages))
@@ -275,10 +339,6 @@ def build(pages: list[Page], s: Settings, out_path: Path, progress=lambda i, n: 
             pw, ph, rect = w, h, pymupdf.Rect(0, 0, w, h)
         out.new_page(width=pw, height=ph).insert_image(rect, stream=buf.getvalue())
     progress(len(pages), len(pages))
-    tmp = out_path.with_name(out_path.name + ".part")  # never leave a half-written PDF
-    out.save(tmp, deflate=True, garbage=3)
-    out.close()
-    os.replace(tmp, out_path)
 
 
 def main():

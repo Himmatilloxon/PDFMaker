@@ -8,7 +8,7 @@ Turn Word documents, PDFs and images into a **flattened PDF**: every page is a p
 
 ## Features
 
-- **Inputs**: Word (`.docx`, `.doc`, `.rtf`, `.odt`), PDF, and images (`.png`, `.jpg`, `.bmp`, `.tif`, `.webp`). Mix them freely; they are merged into one PDF.
+- **Inputs**: Word (`.docx`, `.doc`, `.rtf`, `.odt`), PDF, and images (`.png`, `.jpg`, `.bmp`, `.tif`, `.webp`), including multi-page and 16-bit TIFF scans. Mix them freely; they are merged into one PDF.
 - **Page management**: reorder by dragging, rotate, delete.
 - **Quality presets**: from a small 150 DPI file to lossless 300 DPI.
 - **Image adjustments**: colour, grayscale or black-and-white; brightness; contrast; crop edges.
@@ -40,7 +40,9 @@ Notes:
 
 - The exe is not code-signed, so Windows SmartScreen may warn on first run. Choose **More info → Run anyway**.
 - Word files need Microsoft Word or LibreOffice installed. PDFs and images work without either.
-- Password-protected PDFs are not supported.
+- Macros inside Word files are never run.
+- Password-protected PDFs and Word files are not supported. A protected Word file shows an error after up to 30 seconds.
+- `Del` removes the selected stamp when you are working on the page, and the selected pages when you are in the page list. Anywhere else it does nothing.
 
 ### Shortcuts
 
@@ -71,10 +73,10 @@ The pipeline for each file:
 
 1. **Word → PDF.** Microsoft Word is driven through COM (`pywin32`) for the best fidelity. If Word is missing, LibreOffice is used instead.
 2. **PDF page → image.** [PyMuPDF](https://pymupdf.readthedocs.io/) renders each page in-process at the chosen DPI. Images are loaded with Pillow and fitted onto an A4 page.
-3. **Image processing.** Pillow and NumPy apply crop, background cleaning, brightness, contrast, colour mode and the watermark. Background cleaning estimates the paper colour around each pixel and divides it out, so uneven lighting flattens to white.
+3. **Image processing.** Pillow applies crop, background cleaning, brightness, contrast, colour mode and the watermark. Background cleaning estimates the paper colour around each pixel and divides it out, so uneven lighting flattens to white.
 4. **Images → PDF.** PyMuPDF writes one image per page as JPEG, or PNG for lossless and black-and-white. The page keeps its original physical size.
 
-The window is built with [PySide6](https://doc.qt.io/qtforpython-6/) (Qt). Conversion runs on a background thread so the window stays responsive and the job can be cancelled. The exe is packaged with [PyInstaller](https://pyinstaller.org/).
+The window is built with [PySide6](https://doc.qt.io/qtforpython-6/) (Qt). Conversion runs on a background thread so the window stays responsive and the job can be cancelled. The exe is packaged with [PyInstaller](https://pyinstaller.org/). `build.bat` leaves out parts the app never uses (NumPy, a software OpenGL renderer, Qt translations and PyMuPDF's AI layout models), which halves the size to about 117 MB unzipped.
 
 The first version was a script that chained LibreOffice, Ghostscript and Poppler. This version replaced those with PyMuPDF, which removed two external installs and made PDF and image input possible. The rewrite was done with the help of Claude Code.
 
@@ -83,9 +85,10 @@ The first version was a script that chained LibreOffice, Ghostscript and Poppler
 Requires Python 3.11 or newer on Windows.
 
 ```
-pip install -r requirements.txt
+pip install -r requirements.txt pyinstaller
 python app.py            # run the app
-python test_convert.py   # engine self-check
+python test_convert.py   # engine self-check (also tests Word files if Word is installed)
+python test_app.py       # window self-check, runs hidden
 build.bat                # builds dist\PDFMaker\PDFMaker.exe
 ```
 

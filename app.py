@@ -30,6 +30,7 @@ PRESETS = {  # label -> (dpi, JPEG quality; 0 = lossless PNG)
 }
 MODES = {"Color": "color", "Grayscale": "gray", "Black and white": "bw"}
 THUMB_DPI, PREVIEW_DPI = 20, 110
+STAMP_DIR = None  # None = Documents\PDFMaker Stamps; tests point it at a temp folder
 EMPTY_MESSAGE = "Drop Word, PDF or image files here\n\nor click  Add files"
 STAMP_HINT = "Stamp: drag to move · corner handle or mouse wheel to resize · arrow keys nudge · Del removes"
 
@@ -173,7 +174,7 @@ class StampLibrary(QGroupBox):
     def __init__(self):
         super().__init__("Stamp library (place by hand)")
         docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
-        self.root = Path(docs) / "PDFMaker Stamps"
+        self.root = STAMP_DIR or Path(docs) / "PDFMaker Stamps"
         (self.root / "General").mkdir(parents=True, exist_ok=True)
         self.sizes_file = self.root / "sizes.json"
         try:
@@ -304,6 +305,8 @@ class PageView(QWidget):
         if page is not self.page:
             self.selected = None
         self.pix, self.page, self.message = pix, page, message
+        for st in page.stamps if pix else ():  # rotate or crop may have pushed stamps off the page
+            self.place(st, st.x, st.y)
         self.update()
 
     # ---------- geometry ----------
@@ -493,7 +496,9 @@ class MainWindow(QMainWindow):
         self.pages.files_dropped.connect(self.add_files)
         self.pages.currentItemChanged.connect(lambda *_: self.refresh_preview())
         self.pages.model().rowsMoved.connect(lambda *_: self.update_status())
-        self.pages.model().rowsRemoved.connect(lambda *_: (self.update_status(), self.refresh_preview()))
+        self.pages.model().rowsRemoved.connect(self.pages_removed)
+        self.pages.model().modelReset.connect(self.pages_removed)  # "Clear all"
+        self.base_key = self.base = None  # last rendered preview page, reused while only settings change
 
         self.library = StampLibrary()
         self.library.place.connect(self.place_stamp)
@@ -765,9 +770,17 @@ class MainWindow(QMainWindow):
         # Del is one window-wide shortcut: a selected stamp wins while the preview has focus.
         if self.focusWidget() is self.view and self.view.selected:
             self.view.remove_selected()
-            return
-        for item in self.pages.selectedItems():
-            self.pages.takeItem(self.pages.row(item))
+        elif self.focusWidget() is self.pages:  # pages only when the page list is what you were using
+            for item in self.pages.selectedItems():
+                self.pages.takeItem(self.pages.row(item))
+        else:
+            self.statusBar().showMessage("Click a page in the list, or a stamp on the page, then press Delete.")
+
+    def pages_removed(self, *_):
+        self.update_status()
+        self.refresh_preview()
+        if not (self.worker and self.worker.isRunning()):  # a running load may be opening files right now
+            core.release({p.path for p in self.all_pages()})
 
     # ---------- stamps ----------
 
@@ -802,7 +815,10 @@ class MainWindow(QMainWindow):
             return
         page = item.data(Qt.ItemDataRole.UserRole)
         try:  # hand-placed stamps are drawn live by the view, so they are left out here
-            pix = to_pixmap(core.process(core.render(page, PREVIEW_DPI), self.settings()))
+            key = (page.path, page.index, page.rotation)
+            if key != self.base_key:
+                self.base, self.base_key = core.render(page, PREVIEW_DPI), key
+            pix = to_pixmap(core.process(self.base, self.settings()))
         except Exception as e:
             self.view.show_page(None, None, f"Cannot preview this page:\n{e}")
             return
